@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoIP Tracing Dashboard</title>
+    <!-- Inter Font -->
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- d3.js for visualizations -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+    <!-- TopoJSON for world map -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/topojson/3.0.2/topojson.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        .dashboard-container {
+            height: calc(100vh - 4rem);
+        }
+        .qos-graph-container, .analysis-graph-container {
+            min-height: 250px;
+        }
+        .call-details-table th, .call-details-table td {
+            padding: 0.5rem;
+            text-align: left;
+        }
+        .call-details-table th {
+            font-weight: 600;
+        }
+        .active-call-row:hover {
+            background-color: #f1f5f9; /* slate-100 */
+        }
+        .modal-content {
+            animation: fadeInScale 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        @keyframes fadeInScale {
+            from {
+                opacity: 0;
+                transform: scale(0.95);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+        .modal-open {
+            overflow: hidden;
+        }
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(15, 23, 42, 0.75); /* slate-900 with opacity */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+            overflow-y: auto;
+        }
+        .country {
+            fill: #e2e8f0;
+            stroke: #94a3b8;
+            stroke-width: 0.5px;
+        }
+        .country:hover {
+            fill: #cbd5e1;
+        }
+        .history-table-container {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .pagination-controls {
+            display: flex;
+            justify-content: center;
+            margin-top: 1rem;
+            gap: 0.5rem;
+        }
+        .pagination-btn {
+            padding: 0.25rem 0.5rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.25rem;
+            background-color: #f9fafb;
+            cursor: pointer;
+        }
+        .pagination-btn.active {
+            background-color: #4f46e5;
+            color: white;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <!-- Top Header -->
+    <header class="bg-white shadow-md p-4 flex justify-between items-center z-10">
+        <h1 class="text-2xl font-bold text-indigo-700">VoIP Tracing Dashboard</h1>
+        <div class="flex items-center space-x-4">
+            <span id="refreshStatus" class="text-sm text-gray-500">Last updated: <span id="lastUpdated"></span></span>
+            <button id="refreshBtn" class="bg-indigo-500 hover:bg-indigo-600 text-white font-medium py-2 px-4 rounded-full shadow-md transition-colors duration-200">Refresh Data</button>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="flex dashboard-container">
+        <!-- Sidebar Menu -->
+        <aside class="w-64 bg-gray-800 text-white p-4 space-y-2 flex flex-col items-start transition-all duration-300">
+            <h2 class="text-lg font-semibold text-gray-300 mb-4">Menu</h2>
+            <button class="menu-item dashboard-btn w-full text-left p-3 rounded-xl hover:bg-gray-700 transition-colors duration-200" data-target="dashboard">
+                <span class="mr-3">📊</span> Dashboard
+            </button>
+            <button class="menu-item alerts-btn w-full text-left p-3 rounded-xl hover:bg-gray-700 transition-colors duration-200" data-target="alerts">
+                <span class="mr-3">🚨</span> Alerts
+            </button>
+            <button class="menu-item analysis-btn w-full text-left p-3 rounded-xl hover:bg-gray-700 transition-colors duration-200" data-target="analysis">
+                <span class="mr-3">📈</span> Analysis
+            </button>
+            <button class="menu-item report-btn w-full text-left p-3 rounded-xl hover:bg-gray-700 transition-colors duration-200" data-target="report">
+                <span class="mr-3">📄</span> Report
+            </button>
+        </aside>
+
+        <!-- Content Area -->
+        <div id="content-container" class="flex-1 p-8 overflow-y-auto">
+            <!-- Content will be rendered here by JavaScript -->
+        </div>
+    </main>
+
+    <!-- Modal for Call Details -->
+    <div id="call-details-modal" class="hidden modal-overlay">
+        <div class="modal-content bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 p-8 relative transform scale-95 opacity-0 transition-transform transition-opacity">
+            <button id="close-modal-btn" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800 transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+            <h3 class="text-2xl font-bold text-gray-800 mb-6">Call Details</h3>
+            <div id="modal-content-body">
+                <!-- Details will be populated here -->
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        console.log = function() {}; // Disable console logging for the purpose of this demo.
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const contentContainer = document.getElementById('content-container');
+            const menuItems = document.querySelectorAll('.menu-item');
+            const refreshBtn = document.getElementById('refreshBtn');
+            const lastUpdatedSpan = document.getElementById('lastUpdated');
+            const modal = document.getElementById('call-details-modal');
+            const closeModalBtn = document.getElementById('close-modal-btn');
+            const body = document.body;
+            let activeView = 'dashboard';
+            const callHistory = {};
+            const MAX_HISTORY_PER_PAIR = 10; // Limit history entries per caller-callee pair
+            
+            // --- Mock Data Generation ---
+            const generateMockData = () => {
+                const now = Date.now();
+                const totalCalls = 1500;
+                const answeredCalls = 1200;
+                const missedCalls = 300;
+                const avgDuration = Math.round(Math.random() * 500) + 120; // 2-10 minutes in seconds
+
+                const generateRandomIP = () => {
+                    return `192.168.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
+                };
+
+                const countries = ["USA", "India", "UK", "Germany", "Japan", "Brazil"];
+                const cities = {
+                    "USA": ["New York", "Los Angeles", "Chicago"],
+                    "India": ["Mumbai", "Bengaluru", "Delhi"],
+                    "UK": ["London", "Manchester", "Edinburgh"],
+                    "Germany": ["Berlin", "Munich", "Frankfurt"],
+                    "Japan": ["Tokyo", "Osaka", "Kyoto"],
+                    "Brazil": ["São Paulo", "Rio de Janeiro", "Brasília"]
+                };
+
+                const activeCalls = Array.from({ length: Math.floor(Math.random() * 10) + 10 }).map((_, i) => {
+                    const callerIp = generateRandomIP();
+                    const calleeIp = generateRandomIP();
+                    const callerCountry = countries[Math.floor(Math.random() * countries.length)];
+                    const callerCity = cities[callerCountry][Math.floor(Math.random() * cities[callerCountry].length)];
+                    const calleeCountry = countries[Math.floor(Math.random() * countries.length)];
+                    const calleeCity = cities[calleeCountry][Math.floor(Math.random() * cities[calleeCountry].length)];
+                    const packetLoss = (Math.random() * 10).toFixed(2);
+                    const jitter = (Math.random() * 50).toFixed(2);
+                    const duration = Math.floor(Math.random() * 600) + 60; // 1 to 10 minutes
+                    const timestamp = now - (Math.random() * 3600 * 1000);
+
+                    const callerId = `user_${i + 1}`;
+                    const calleeId = `user_${i + 101}`;
+
+                    const callData = {
+                        callerId,
+                        calleeId,
+                        callerIp,
+                        calleeIp,
+                        callerCountry,
+                        callerCity,
+                        calleeCountry,
+                        calleeCity,
+                        deviceInfoRisk: Math.random() < 0.1 ? 'High' : 'Low',
+                        packetLoss: parseFloat(packetLoss),
+                        jitter: parseFloat(jitter),
+                        duration,
+                        timestamp,
+                        protocols: ['SIP', 'RTP'],
+                        RTCPStats: {
+                            sentPackets: Math.floor(Math.random() * 10000),
+                            receivedPackets: Math.floor(Math.random() * 10000),
+                            sentOctets: Math.floor(Math.random() * 1000000),
+                            receivedOctets: Math.floor(Math.random() * 1000000)
+                        },
+                        sessionDetails: 'Normal session, G.711 codec',
+                    };
+
+                    // Add to call history with limit
+                    const historyKey = `${callerId}_${calleeId}`;
+                    if (!callHistory[historyKey]) {
+                        callHistory[historyKey] = [];
+                    }
+                    
+                    // Keep only the most recent calls (limit to MAX_HISTORY_PER_PAIR)
+                    callHistory[historyKey].unshift(callData);
+                    if (callHistory[historyKey].length > MAX_HISTORY_PER_PAIR) {
+                        callHistory[historyKey].pop(); // Remove the oldest entry
+                    }
+
+                    return callData;
+                });
+
+                const highRiskCalls = activeCalls.filter(call => call.packetLoss > 5 || call.deviceInfoRisk === 'High');
+                const fraudCalls = activeCalls.filter(call => Math.random() < 0.05);
+
+                const qosData = Array.from({ length: 60 }).map((_, i) => ({
+                    timestamp: now - (60 - i) * 60000,
+                    packetLoss: Math.random() * 5,
+                    jitter: Math.random() * 30
+                }));
+
+                const weekData = Array.from({ length: 7 }).map((_, i) => ({
+                    day: `Day ${i + 1}`,
+                    totalCalls: Math.floor(Math.random() * 500) + 1000,
+                    answered: Math.floor(Math.random() * 400) + 800,
+                    missed: Math.floor(Math.random() * 100) + 100,
+                    avgDuration: Math.floor(Math.random() * 100) + 200,
+                }));
+            
+                return {
+                    activeCalls,
+                    highRiskCalls,
+                    fraudCalls,
+                    qosData,
+                    weekData,
+                    totalCalls,
+                    answeredCalls,
+                    missedCalls,
+                    avgDuration
+                };
+            };
+            
+            let data = generateMockData();
+
+            // --- UI Rendering Functions ---
+            
+            const renderDashboard = () => {
+                const dashboardHtml = `
+                    <div class="space-y-8">
+                        <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+                            <div class="bg-white p-6 rounded-2xl shadow-lg transition-transform hover:scale-105">
+                                <h3 class="text-gray-500 font-medium text-sm">Active Calls</h3>
+                                <p class="text-4xl font-bold text-gray-800">${data.activeCalls.length}</p>
+                            </div>
+                            <div class="bg-white p-6 rounded-2xl shadow-lg transition-transform hover:scale-105">
+                                <h3 class="text-gray-500 font-medium text-sm">Total Calls</h3>
+                                <p class="text-4xl font-bold text-gray-800">${data.totalCalls}</p>
+                            </div>
+                            <div class="bg-white p-6 rounded-2xl shadow-lg transition-transform hover:scale-105">
+                                <h3 class="text-gray-500 font-medium text-sm">Fraud Calls</h3>
+                                <p class="text-4xl font-bold text-gray-800 text-red-500">${data.fraudCalls.length}</p>
+                            </div>
+                            <div class="bg-white p-6 rounded-2xl shadow-lg transition-transform hover:scale-105">
+                                <h3 class="text-gray-500 font-medium text-sm">Average Duration</h3>
+                                <p class="text-4xl font-bold text-gray-800">${Math.round(data.avgDuration / 60)} min</p>
+                            </div>
+                        </div>
+
+                        <!-- Calls Map -->
+                        <div class="bg-white p-6 rounded-2xl shadow-lg">
+                            <h2 class="text-xl font-bold text-gray-800 mb-4">Calls Map (GeoIP)</h2>
+                            <div id="calls-map-container" class="w-full h-80"></div>
+                        </div>
+
+                        <!-- QoS Graphs -->
+                        <div class="bg-white p-6 rounded-2xl shadow-lg">
+                            <h2 class="text-xl font-bold text-gray-800 mb-4">QoS Graphs (Jitter & Packet Loss)</h2>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div class="qos-graph-container" id="packet-loss-graph"></div>
+                                <div class="qos-graph-container" id="jitter-graph"></div>
+                            </div>
+                        </div>
+                        
+                        <!-- Active Calls Table -->
+                        <div class="bg-white p-6 rounded-2xl shadow-lg">
+                            <h2 class="text-xl font-bold text-gray-800 mb-4">Active Calls</h2>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full divide-y divide-gray-200">
+                                    <thead class="bg-gray-50">
+                                        <tr>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Caller ID</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Callee ID</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Device Info Risk</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Packet Loss (%)</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="bg-white divide-y divide-gray-200" id="active-calls-table-body">
+                                        ${data.activeCalls.map((call, index) => `
+                                            <tr class="active-call-row transition-all duration-200">
+                                                <td class="px-6 py-4 whitespace-nowrap">${call.callerId}</td>
+                                                <td class="px-6 py-4 whitespace-nowrap">${call.calleeId}</td>
+                                                <td class="px-6 py-4 whitespace-nowrap">
+                                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${call.deviceInfoRisk === 'High' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}">
+                                                        ${call.deviceInfoRisk}
+                                                    </span>
+                                                </td>
+                                                <td class="px-6 py-4 whitespace-nowrap">${call.packetLoss}</td>
+                                                <td class="px-6 py-4 whitespace-nowrap">
+                                                    <button class="view-call-btn text-indigo-600 hover:text-indigo-900 font-medium" data-index="${index}">View</button>
+                                                </td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                contentContainer.innerHTML = dashboardHtml;
+                renderGraphs();
+            };
+
+            const renderAlerts = () => {
+                const alertsHtml = `
+                    <div class="space-y-6">
+                        <h1 class="text-3xl font-bold text-gray-800">Alerts</h1>
+                        <p class="text-gray-600">Calls with high packet loss risk or potential fraud.</p>
+                        <div class="bg-white p-6 rounded-2xl shadow-lg">
+                            <h2 class="text-xl font-bold text-gray-800 mb-4">High Risk Calls</h2>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full divide-y divide-gray-200">
+                                    <thead class="bg-gray-50">
+                                        <tr>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Caller ID</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Callee ID</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Packet Loss (%)</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Risk Level</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                        ${data.highRiskCalls.length > 0 ? data.highRiskCalls.map(call => `
+                                            <tr>
+                                                <td class="px-6 py-4 whitespace-nowrap">${call.callerId}</td>
+                                                <td class="px-6 py-4 whitespace-nowrap">${call.calleeId}</td>
+                                                <td class="px-6 py-4 whitespace-nowrap">${call.packetLoss.toFixed(2)}</td>
+                                                <td class="px-6 py-4 whitespace-nowrap">
+                                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${call.deviceInfoRisk === 'High' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}">
+                                                        ${call.deviceInfoRisk === 'High' ? 'High Device Risk' : 'High Packet Loss'}
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        `).join('') : `
+                                            <tr>
+                                                <td colspan="4" class="px-6 py-4 text-center text-gray-500">No high-risk calls found.</td>
+                                            </tr>
+                                        `}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                contentContainer.innerHTML = alertsHtml;
+            };
+
+            const renderAnalysis = () => {
+                const analysisHtml = `
+                    <div class="space-y-6">
+                        <h1 class="text-3xl font-bold text-gray-800">Analysis</h1>
+                        <p class="text-gray-600">Graphs showing data from the last week.</p>
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div class="bg-white p-6 rounded-2xl shadow-lg analysis-graph-container" id="call-volume-graph">
+                                <h2 class="text-xl font-bold text-gray-800 mb-4">Weekly Call Volume</h2>
+                            </div>
+                            <div class="bg-white p-6 rounded-2xl shadow-lg analysis-graph-container" id="duration-graph">
+                                <h2 class="text-xl font-bold text-gray-800 mb-4">Average Call Duration</h2>
+                            </div>
+                        </div>
+                        <div class="bg-white p-6 rounded-2xl shadow-lg">
+                            <h2 class="text-xl font-bold text-gray-800 mb-4">Summary Table</h2>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full divide-y divide-gray-200">
+                                    <thead class="bg-gray-50">
+                                        <tr>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Metric</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                        <tr>
+                                            <td class="px-6 py-4 whitespace-nowrap">Total Calls Last Week</td>
+                                            <td class="px-6 py-4 whitespace-nowrap">${data.weekData.reduce((sum, d) => sum + d.totalCalls, 0)}</td>
+                                        </tr>
+                                        <tr>
+                                            <td class="px-6 py-4 whitespace-nowrap">Answered Calls Last Week</td>
+                                            <td class="px-6 py-4 whitespace-nowrap">${data.weekData.reduce((sum, d) => sum + d.answered, 0)}</td>
+                                        </tr>
+                                        <tr>
+                                            <td class="px-6 py-4 whitespace-nowrap">Missed Calls Last Week</td>
+                                            <td class="px-6 py-4 whitespace-nowrap">${data.weekData.reduce((sum, d) => sum + d.missed, 0)}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                contentContainer.innerHTML = analysisHtml;
+                renderAnalysisGraphs();
+            };
+
+            const renderReport = () => {
+                const reportHtml = `
+                    <div class="space-y-6">
+                        <h1 class="text-3xl font-bold text-gray-800">Reports</h1>
+                        <p class="text-gray-600">Download data from previous week in various formats.</p>
+                        <div class="bg-white p-6 rounded-2xl shadow-lg flex flex-col items-start gap-4">
+                            <p class="text-lg font-medium">Download Last Week's Data</p>
+                            <div class="flex space-x-4">
+                                <button class="download-btn bg-green-500 hover:bg-green-600 text-white font-medium py-3 px-6 rounded-full shadow-md transition-colors duration-200">
+                                    <span class="mr-2">📄</span> Download PDF
+                                </button>
+                                <button class="download-btn bg-blue-500 hover:bg-blue-600 text-white font-medium py-3 px-6 rounded-full shadow-md transition-colors duration-200">
+                                    <span class="mr-2">📁</span> Download Excel
+                                </button>
+                            </div>
+                            <div id="download-message" class="mt-4 text-sm text-gray-500 hidden">
+                                <p>Report generation is a complex feature. For this demo, this button serves as a placeholder to show the functionality.</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                contentContainer.innerHTML = reportHtml;
+            };
+            
+            // --- D3 Graph & Map Rendering ---
+            const renderGraphs = () => {
+                // QoS Graphs
+                const drawLineGraph = (data, selector, yLabel, color, maxVal) => {
+                    const margin = { top: 20, right: 30, bottom: 40, left: 50 };
+                    const container = document.getElementById(selector);
+                    if (!container) return;
+                    const width = container.clientWidth - margin.left - margin.right;
+                    const height = container.clientHeight - margin.top - margin.bottom;
+
+                    d3.select(`#${selector} svg`).remove();
+
+                    const svg = d3.select(`#${selector}`)
+                        .append("svg")
+                        .attr("width", width + margin.left + margin.right)
+                        .attr("height", height + margin.top + margin.bottom)
+                        .append("g")
+                        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+                    const x = d3.scaleTime()
+                        .domain(d3.extent(data, d => new Date(d.timestamp)))
+                        .range([0, width]);
+
+                    const y = d3.scaleLinear()
+                        .domain([0, maxVal])
+                        .range([height, 0]);
+
+                    svg.append("g")
+                        .attr("transform", `translate(0,${height})`)
+                        .call(d3.axisBottom(x).ticks(5).tickFormat(d3.timeFormat("%H:%M")));
+
+                    svg.append("g")
+                        .call(d3.axisLeft(y));
+
+                    svg.append("path")
+                        .datum(data)
+                        .attr("fill", "none")
+                        .attr("stroke", color)
+                        .attr("stroke-width", 2.5)
+                        .attr("d", d3.line()
+                            .x(d => x(new Date(d.timestamp)))
+                            .y(d => y(d[yLabel]))
+                        );
+                    
+                    svg.append("text")
+                        .attr("transform", "rotate(-90)")
+                        .attr("y", -margin.left + 15)
+                        .attr("x", -height / 2)
+                        .attr("dy", "1em")
+                        .style("text-anchor", "middle")
+                        .text(yLabel.charAt(0).toUpperCase() + yLabel.slice(1));
+                };
+
+                drawLineGraph(data.qosData, 'packet-loss-graph', 'packetLoss', '#ef4444', 10); // Red for packet loss
+                drawLineGraph(data.qosData, 'jitter-graph', 'jitter', '#3b82f6', 50); // Blue for jitter
+                
+                // Calls Map
+                renderCallsMap();
+            };
+
+            const renderCallsMap = () => {
+                const mapContainer = document.getElementById('calls-map-container');
+                if (!mapContainer) return;
+                
+                // Clear previous map
+                d3.select('#calls-map-container svg').remove();
+                
+                const width = mapContainer.clientWidth;
+                const height = mapContainer.clientHeight;
+                
+                // Create SVG container
+                const svg = d3.select("#calls-map-container")
+                    .append("svg")
+                    .attr("width", width)
+                    .attr("height", height);
+                
+                // Create a projection
+                const projection = d3.geoMercator()
+                    .scale(width / 6.5)
+                    .translate([width / 2, height / 2]);
+                
+                // Create a path generator
+                const path = d3.geoPath().projection(projection);
+                
+                // Load world map data
+                d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then(worldData => {
+                    // Convert TopoJSON to GeoJSON
+                    const countries = topojson.feature(worldData, worldData.objects.countries);
+                    
+                    // Draw the map
+                    svg.selectAll(".country")
+                        .data(countries.features)
+                        .enter().append("path")
+                        .attr("class", "country")
+                        .attr("d", path);
+                    
+                    // City coordinates mapping
+                    const cityCoordinates = {
+                        "New York": { lat: 40.7128, lon: -74.0060 },
+                        "Los Angeles": { lat: 34.0522, lon: -118.2437 },
+                        "Chicago": { lat: 41.8781, lon: -87.6298 },
+                        "Mumbai": { lat: 19.0760, lon: 72.8777 },
+                        "Bengaluru": { lat: 12.9716, lon: 77.5946 },
+                        "Delhi": { lat: 28.6139, lon: 77.2090 },
+                        "London": { lat: 51.5074, lon: -0.1278 },
+                        "Manchester": { lat: 53.4808, lon: -2.2426 },
+                        "Edinburgh": { lat: 55.9533, lon: -3.1883 },
+                        "Berlin": { lat: 52.5200, lon: 13.4050 },
+                        "Munich": { lat: 48.1351, lon: 11.5820 },
+                        "Frankfurt": { lat: 50.1109, lon: 8.6821 },
+                        "Tokyo": { lat: 35.6895, lon: 139.6917 },
+                        "Osaka": { lat: 34.6937, lon: 135.5023 },
+                        "Kyoto": { lat: 35.0116, lon: 135.7681 },
+                        "São Paulo": { lat: -23.5505, lon: -46.6333 },
+                        "Rio de Janeiro": { lat: -22.9068, lon: -43.1729 },
+                        "Brasília": { lat: -15.7975, lon: -47.8919 }
+                    };
+                    
+                    // Draw call connections
+                    data.activeCalls.forEach(call => {
+                        const callerCity = call.callerCity;
+                        const calleeCity = call.calleeCity;
+                        
+                        if (cityCoordinates[callerCity] && cityCoordinates[calleeCity]) {
+                            const callerCoords = projection([cityCoordinates[callerCity].lon, cityCoordinates[callerCity].lat]);
+                            const calleeCoords = projection([cityCoordinates[calleeCity].lon, cityCoordinates[calleeCity].lat]);
+                            
+                            if (callerCoords && calleeCoords) {
+                                // Draw connection line
+                                svg.append("line")
+                                    .attr("x1", callerCoords[0])
+                                    .attr("y1", callerCoords[1])
+                                    .attr("x2", calleeCoords[0])
+                                    .attr("y2", calleeCoords[1])
+                                    .attr("stroke", "#4f46e5")
+                                    .attr("stroke-width", 1.5)
+                                    .attr("opacity", 0.6)
+                                    .style("stroke-dasharray", ("5, 5"));
+                                
+                                // Draw caller marker
+                                svg.append("circle")
+                                    .attr("cx", callerCoords[0])
+                                    .attr("cy", callerCoords[1])
+                                    .attr("r", 4)
+                                    .attr("fill", "red")
+                                    .attr("stroke", "white")
+                                    .attr("stroke-width", 1);
+                                    
+                                // Draw callee marker
+                                svg.append("circle")
+                                    .attr("cx", calleeCoords[0])
+                                    .attr("cy", calleeCoords[1])
+                                    .attr("r", 4)
+                                    .attr("fill", "blue")
+                                    .attr("stroke", "white")
+                                    .attr("stroke-width", 1);
+                            }
+                        }
+                    });
+                }).catch(error => {
+                    console.error("Error loading world map data:", error);
+                    // Fallback: show a simple message if map data fails to load
+                    svg.append("text")
+                        .attr("x", width / 2)
+                        .attr("y", height / 2)
+                        .attr("text-anchor", "middle")
+                        .text("World map data could not be loaded");
+                });
+            };
+
+            const renderAnalysisGraphs = () => {
+                const drawBarGraph = (data, selector, xLabel, yLabel, color) => {
+                    const margin = { top: 20, right: 30, bottom: 40, left: 50 };
+                    const container = document.getElementById(selector);
+                    if (!container) return;
+                    const width = container.clientWidth - margin.left - margin.right;
+                    const height = container.clientHeight - margin.top - margin.bottom;
+
+                    d3.select(`#${selector} svg`).remove();
+
+                    const svg = d3.select(`#${selector}`)
+                        .append("svg")
+                        .attr("width", width + margin.left + margin.right)
+                        .attr("height", height + margin.top + margin.bottom)
+                        .append("g")
+                        .attr("transform", `translate(${margin.left},${margin.top})`);
+                    
+                    const x = d3.scaleBand()
+                        .domain(data.map(d => d[xLabel]))
+                        .range([0, width])
+                        .padding(0.2);
+
+                    const y = d3.scaleLinear()
+                        .domain([0, d3.max(data, d => d[yLabel]) * 1.1])
+                        .range([height, 0]);
+
+                    svg.append("g")
+                        .attr("transform", `translate(0,${height})`)
+                        .call(d3.axisBottom(x));
+
+                    svg.append("g")
+                        .call(d3.axisLeft(y));
+
+                    svg.selectAll("rect")
+                        .data(data)
+                        .enter()
+                        .append("rect")
+                        .attr("x", d => x(d[xLabel]))
+                        .attr("y", d => y(d[yLabel]))
+                        .attr("width", x.bandwidth())
+                        .attr("height", d => height - y(d[yLabel]))
+                        .attr("fill", color)
+                        .attr("rx", 5)
+                        .attr("ry", 5);
+                };
+
+                drawBarGraph(data.weekData, 'call-volume-graph', 'day', 'totalCalls', '#4c51bf');
+                drawBarGraph(data.weekData, 'duration-graph', 'day', 'avgDuration', '#10b981');
+            };
+
+            // --- Event Handlers ---
+            const handleViewDetails = (callIndex) => {
+                const call = data.activeCalls[callIndex];
+                const callKey = `${call.callerId}_${call.calleeId}`;
+                const history = callHistory[callKey] || [];
+
+                // Create paginated history view
+                const itemsPerPage = 5;
+                let currentPage = 1;
+                const totalPages = Math.ceil(history.length / itemsPerPage);
+                
+                const renderHistoryTable = (page) => {
+                    const startIndex = (page - 1) * itemsPerPage;
+                    const endIndex = Math.min(startIndex + itemsPerPage, history.length);
+                    const pageData = history.slice(startIndex, endIndex);
+                    
+                    return pageData.map(h => `
+                        <tr>
+                            <td class="px-4 py-2">${new Date(h.timestamp).toLocaleString()}</td>
+                            <td class="px-4 py-2">${(h.duration / 60).toFixed(1)} min</td>
+                            <td class="px-4 py-2">${h.packetLoss.toFixed(2)}%</td>
+                        </tr>
+                    `).join('');
+                };
+                
+                const renderPaginationControls = () => {
+                    if (totalPages <= 1) return '';
+                    
+                    let paginationHtml = '<div class="pagination-controls">';
+                    
+                    if (currentPage > 1) {
+                        paginationHtml += `<button class="pagination-btn prev-btn" data-page="${currentPage - 1}">← Previous</button>`;
+                    }
+                    
+                    for (let i = 1; i <= totalPages; i++) {
+                        paginationHtml += `<button class="pagination-btn ${i === currentPage ? 'active' : ''}" data-page="${i}">${i}</button>`;
+                    }
+                    
+                    if (currentPage < totalPages) {
+                        paginationHtml += `<button class="pagination-btn next-btn" data-page="${currentPage + 1}">Next →</button>`;
+                    }
+                    
+                    paginationHtml += '</div>';
+                    return paginationHtml;
+                };
+
+                const modalContent = `
+                    <div class="space-y-6">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <h4 class="text-lg font-bold text-gray-700">Caller Details</h4>
+                                <ul class="list-disc list-inside space-y-1 mt-2">
+                                    <li><span class="font-semibold">Caller ID:</span> ${call.callerId}</li>
+                                    <li><span class="font-semibold">IP:</span> ${call.callerIp}</li>
+                                    <li><span class="font-semibold">Location:</span> ${call.callerCity}, ${call.callerCountry}</li>
+                                </ul>
+                            </div>
+                            <div>
+                                <h4 class="text-lg font-bold text-gray-700">Callee Details</h4>
+                                <ul class="list-disc list-inside space-y-1 mt-2">
+                                    <li><span class="font-semibold">Callee ID:</span> ${call.calleeId}</li>
+                                    <li><span class="font-semibold">IP:</span> ${call.calleeIp}</li>
+                                    <li><span class="font-semibold">Location:</span> ${call.calleeCity}, ${call.calleeCountry}</li>
+                                </ul>
+                            </div>
+                        </div>
+
+                        <div class="space-y-4">
+                            <h4 class="text-lg font-bold text-gray-700">Session Details</h4>
+                            <div class="overflow-x-auto">
+                                <table class="call-details-table w-full">
+                                    <tbody>
+                                        <tr>
+                                            <th>Protocols</th>
+                                            <td>${call.protocols.join(', ')}</td>
+                                            <th>Duration</th>
+                                            <td>${(call.duration / 60).toFixed(1)} min</td>
+                                        </tr>
+                                        <tr>
+                                            <th>Jitter</th>
+                                            <td>${call.jitter.toFixed(2)} ms</td>
+                                            <th>Packet Loss</th>
+                                            <td>${call.packetLoss.toFixed(2)}%</td>
+                                        </tr>
+                                        <tr>
+                                            <th>RTCP Stats (Sent)</th>
+                                            <td>${call.RTCPStats.sentPackets} packets / ${call.RTCPStats.sentOctets} octets</td>
+                                            <th>RTCP Stats (Received)</th>
+                                            <td>${call.RTCPStats.receivedPackets} packets / ${call.RTCPStats.receivedOctets} octets</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        
+                        <div class="space-y-4">
+                            <h4 class="text-lg font-bold text-gray-700">Call History between them (${history.length} calls)</h4>
+                            <div class="history-table-container">
+                                <table class="min-w-full divide-y divide-gray-200">
+                                    <thead class="bg-gray-50">
+                                        <tr>
+                                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
+                                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
+                                            <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Packet Loss</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="bg-white divide-y divide-gray-200" id="history-table-body">
+                                        ${renderHistoryTable(currentPage)}
+                                    </tbody>
+                                </table>
+                            </div>
+                            ${renderPaginationControls()}
+                        </div>
+                    </div>
+                `;
+                
+                document.getElementById('modal-content-body').innerHTML = modalContent;
+                modal.classList.remove('hidden');
+                body.classList.add('modal-open');
+                
+                // Add event listeners for pagination buttons
+                document.querySelectorAll('.pagination-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        currentPage = parseInt(e.target.getAttribute('data-page'));
+                        document.getElementById('history-table-body').innerHTML = renderHistoryTable(currentPage);
+                        document.getElementById('modal-content-body').querySelector('.pagination-controls').innerHTML = renderPaginationControls();
+                        
+                        // Reattach event listeners to the new pagination buttons
+                        document.querySelectorAll('.pagination-btn').forEach(newBtn => {
+                            newBtn.addEventListener('click', (evt) => {
+                                evt.preventDefault();
+                                currentPage = parseInt(evt.target.getAttribute('data-page'));
+                                document.getElementById('history-table-body').innerHTML = renderHistoryTable(currentPage);
+                                document.getElementById('modal-content-body').querySelector('.pagination-controls').innerHTML = renderPaginationControls();
+                                
+                                // Reattach event listeners again
+                                document.querySelectorAll('.pagination-btn').forEach(btn => {
+                                    btn.addEventListener('click', (event) => {
+                                        event.preventDefault();
+                                        currentPage = parseInt(event.target.getAttribute('data-page'));
+                                        document.getElementById('history-table-body').innerHTML = renderHistoryTable(currentPage);
+                                        document.getElementById('modal-content-body').querySelector('.pagination-controls').innerHTML = renderPaginationControls();
+                                    });
+                                });
+                            });
+                        });
+                    });
+                });
+            };
+
+            const refreshData = () => {
+                data = generateMockData();
+                const now = new Date();
+                lastUpdatedSpan.textContent = now.toLocaleTimeString();
+                
+                // Re-render the active view with new data
+                if (activeView === 'dashboard') {
+                    renderDashboard();
+                } else if (activeView === 'alerts') {
+                    renderAlerts();
+                } else if (activeView === 'analysis') {
+                    renderAnalysis();
+                } else if (activeView === 'report') {
+                    renderReport();
+                }
+            };
+            
+            // --- Initial Setup and Listeners ---
+            
+            const renderView = (view) => {
+                activeView = view;
+                menuItems.forEach(item => {
+                    item.classList.remove('bg-indigo-700', 'text-white');
+                    item.classList.add('text-gray-300');
+                });
+                document.querySelector(`[data-target="${view}"]`).classList.add('bg-indigo-700', 'text-white');
+                document.querySelector(`[data-target="${view}"]`).classList.remove('text-gray-300');
+                
+                switch (view) {
+                    case 'dashboard':
+                        renderDashboard();
+                        break;
+                    case 'alerts':
+                        renderAlerts();
+                        break;
+                    case 'analysis':
+                        renderAnalysis();
+                        break;
+                    case 'report':
+                        renderReport();
+                        break;
+                }
+            };
+
+            menuItems.forEach(item => {
+                item.addEventListener('click', () => {
+                    const view = item.getAttribute('data-target');
+                    renderView(view);
+                });
+            });
+
+            refreshBtn.addEventListener('click', refreshData);
+            
+            document.addEventListener('click', (e) => {
+                if (e.target.matches('.view-call-btn')) {
+                    const index = e.target.getAttribute('data-index');
+                    handleViewDetails(parseInt(index));
+                }
+                if (e.target.matches('.download-btn')) {
+                    const downloadMessage = document.getElementById('download-message');
+                    downloadMessage.classList.remove('hidden');
+                }
+            });
+
+            closeModalBtn.addEventListener('click', () => {
+                modal.classList.add('hidden');
+                body.classList.remove('modal-open');
+            });
+
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    modal.classList.add('hidden');
+                    body.classList.remove('modal-open');
+                }
+            });
+            
+            // Initial render
+            refreshData();
+            renderView('dashboard');
+        });
+    </script>
+</body>
+</html>
